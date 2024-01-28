@@ -7,11 +7,7 @@ type cell = typevar option ref
 and reference = Ref of cell
 and typevar = reference Types.t
 
-type c =
-  | Eq of
-      { lhs : typevar
-      ; rhs : typevar
-      }
+type c = Eq of typevar * typevar
 
 type t =
   { stack : cell Stack.t
@@ -39,7 +35,7 @@ let constraints lang =
       , Types.Fn { _from = rfrom; _to = rto } ) ->
       unify lfrom rfrom;
       unify lto rto
-    | _, _ -> Queue.add (Eq { lhs; rhs }) ct.workq
+    | _ -> Queue.add (Eq (lhs, rhs)) ct.workq
   in
   let tbl = Table.create 1 in
   let rec loop = function
@@ -70,14 +66,19 @@ let constraints lang =
 
 exception TypeError
 
-let rec concrete = function
-  | Types.Void (Ref r) ->
-    (match !r with
-     | Some t -> concrete t
-     | None -> raise TypeError)
-  | Types.Bool -> Types.Bool
-  | Types.Fn { _from; _to } ->
-    Types.Fn { _from = concrete _from; _to = concrete _to }
+let to_type tbl =
+  let rec concrete : reference Types.t -> unit Types.t = function
+    | Types.Void (Ref r) ->
+      (match !r with
+       | Some t -> concrete t
+       | None -> raise TypeError)
+    | Types.Bool -> Types.Bool
+    | Types.Fn { _from; _to } ->
+      Types.Fn { _from = concrete _from; _to = concrete _to }
+  in
+  let types = Table.create (Table.length tbl) in
+  Table.iter (fun k v -> Table.add types k (concrete v)) tbl;
+  types
 ;;
 
 let infer lang =
@@ -85,15 +86,16 @@ let infer lang =
   let rec loop = function
     | retries when retries > 0 ->
       let t = Queue.take ct.workq in
-      let (Eq { lhs; rhs }) = t in
+      let (Eq (lhs, rhs)) = t in
       let (), less =
         match lhs, rhs with
         | Types.Void (Ref r1), Types.Void (Ref r2) ->
           (match r1, r2 with
-           | { contents = Some t1 }, { contents = None } -> (r2 := Some t1), 1
-           | { contents = None }, { contents = Some t2 } -> (r1 := Some t2), 1
+           | { contents = Some t }, ({ contents = None } as r)
+           | ({ contents = None } as r), { contents = Some t } ->
+             (r := Some t), 1
            | { contents = Some t1 }, { contents = Some t2 } ->
-             Queue.add (Eq { lhs = t1; rhs = t2 }) ct.workq, 0
+             Queue.add (Eq (t1, t2)) ct.workq, 0
            | _, _ -> Queue.add t ct.workq, 1)
         | Types.Void (Ref r), c | c, Types.Void (Ref r) -> (r := Some c), 1
         | _, _ -> Queue.add t ct.workq, 0
@@ -102,12 +104,7 @@ let infer lang =
     | _ -> ()
   in
   loop (Queue.length ct.workq);
-  if Queue.is_empty ct.workq
-  then (
-    let h = Table.create (Table.length tbl) in
-    Table.iter (fun k v -> Table.add h k (concrete v)) tbl;
-    Ok h)
-  else Error (tbl, ct)
+  if Queue.is_empty ct.workq then Ok (to_type tbl) else Error (tbl, ct)
 ;;
 
 let%test "true" =
