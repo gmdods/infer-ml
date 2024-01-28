@@ -1,0 +1,6 @@
+(executable
+ (public_name infer)
+ (name main)
+ (libraries infer)
+ (preprocess
+  (pps ppx_inline_test)))
