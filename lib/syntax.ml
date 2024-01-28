@@ -22,18 +22,13 @@ type t =
       }
   | Bool of bool
 
-module TypeOf (F : sig
-    type 'a alg
-  end) =
-struct
-  include F
-
-  type a =
+module Types = struct
+  type 'a t =
+    | Void of 'a
     | Bool
     | Fn of
-        { _from : t
-        ; _to : t
+        { _from : 'a t
+        ; _to : 'a t
         }
-
-  and t = a F.alg
 end
+

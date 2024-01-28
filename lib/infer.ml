@@ -3,26 +3,18 @@ module Table = Hashtbl.Make (Int)
 
 type index = int
 
-module Types = TypeOf (struct
-    type 'a alg = 'a
-  end)
-
-module Cell = struct
-  type 'a alg =
-    | Ctor of 'a
-    | Ref of 'a option ref * index
-end
-
-module TypeVar = TypeOf (Cell)
+type cell = typevar option ref
+and reference = Ref of cell
+and typevar = reference Types.t
 
 type c =
   | Eq of
-      { lhs : TypeVar.t
-      ; rhs : TypeVar.t
+      { lhs : typevar
+      ; rhs : typevar
       }
 
 type t =
-  { stack : TypeVar.a option ref Stack.t
+  { stack : cell Stack.t
   ; workq : c Queue.t
   }
 
@@ -33,19 +25,18 @@ let create () =
 ;;
 
 let cell { stack; _ } =
-  let index = Stack.length stack in
   let r = ref None in
   Stack.push r stack;
-  Cell.Ref (r, index)
+  Types.Void (Ref r)
 ;;
 
 let constraints lang =
   let ct = create () in
   let rec unify lhs rhs =
     match lhs, rhs with
-    | Cell.Ctor TypeVar.Bool, Cell.Ctor TypeVar.Bool -> ()
-    | ( Cell.Ctor (TypeVar.Fn { _from = lfrom; _to = lto })
-      , Cell.Ctor (TypeVar.Fn { _from = rfrom; _to = rto }) ) ->
+    | Types.Bool, Types.Bool -> ()
+    | ( Types.Fn { _from = lfrom; _to = lto }
+      , Types.Fn { _from = rfrom; _to = rto } ) ->
       unify lfrom rfrom;
       unify lto rto
     | _, _ -> Queue.add (Eq { lhs; rhs }) ct.workq
@@ -57,28 +48,22 @@ let constraints lang =
        | Some t -> t
        | None -> cell ct)
     | Let { _let; _be; _in } ->
-      let ty = loop _be in
-      Table.add tbl _let ty;
+      Table.add tbl _let (loop _be);
       loop _in
     | Fn { _from; _to } ->
       let ty_from = cell ct in
       Table.add tbl _from ty_from;
-      let ty_to = loop _to in
-      Cell.Ctor (TypeVar.Fn { _from = ty_from; _to = ty_to })
+      Types.Fn { _from = ty_from; _to = loop _to }
     | Call { _fn; _with } ->
-      let ty_with = loop _with in
       let ty_ret = cell ct in
-      let ty_fn = loop _fn in
-      unify ty_fn (Cell.Ctor (TypeVar.Fn { _from = ty_with; _to = ty_ret }));
+      unify (loop _fn) (Types.Fn { _from = loop _with; _to = ty_ret });
       ty_ret
     | If { _if; _then; _else } ->
-      let ty_if = loop _if in
-      unify ty_if (Cell.Ctor TypeVar.Bool);
+      unify (loop _if) Types.Bool;
       let ty_then = loop _then in
-      let ty_else = loop _else in
-      unify ty_then ty_else;
-      ty_else
-    | Bool _b -> Cell.Ctor TypeVar.Bool
+      unify ty_then (loop _else);
+      ty_then
+    | Bool _b -> Types.Bool
   in
   loop lang, tbl, ct
 ;;
@@ -86,15 +71,12 @@ let constraints lang =
 exception TypeError
 
 let rec concrete = function
-  | Cell.Ctor ctor -> restruct ctor
-  | Cell.Ref (r, _) ->
+  | Types.Void (Ref r) ->
     (match !r with
-     | Some t -> restruct t
+     | Some t -> concrete t
      | None -> raise TypeError)
-
-and restruct = function
-  | TypeVar.Bool -> Types.Bool
-  | TypeVar.Fn { _from; _to } ->
+  | Types.Bool -> Types.Bool
+  | Types.Fn { _from; _to } ->
     Types.Fn { _from = concrete _from; _to = concrete _to }
 ;;
 
@@ -104,25 +86,19 @@ let infer lang =
     | retries when retries > 0 ->
       let t = Queue.take ct.workq in
       let (Eq { lhs; rhs }) = t in
-      (match lhs, rhs with
-       | Cell.Ref (r, _), Cell.Ctor c | Cell.Ctor c, Cell.Ref (r, _) ->
-         r := Some c;
-         loop (retries - 1)
-       | ( Cell.Ref ({ contents = Some t1 }, _)
-         , Cell.Ref (({ contents = None } as r2), _) ) ->
-         r2 := Some t1;
-         loop (retries - 1)
-       | ( Cell.Ref (({ contents = None } as r1), _)
-         , Cell.Ref ({ contents = Some t2 }, _) ) ->
-         r1 := Some t2;
-         loop (retries - 1)
-       | ( Cell.Ref ({ contents = Some t1 }, _)
-         , Cell.Ref ({ contents = Some t2 }, _) ) ->
-         Queue.add (Eq { lhs = Cell.Ctor t1; rhs = Cell.Ctor t2 }) ct.workq;
-         loop retries
-       | _ ->
-         Queue.add t ct.workq;
-         loop (retries - 1))
+      let (), less =
+        match lhs, rhs with
+        | Types.Void (Ref r1), Types.Void (Ref r2) ->
+          (match r1, r2 with
+           | { contents = Some t1 }, { contents = None } -> (r2 := Some t1), 1
+           | { contents = None }, { contents = Some t2 } -> (r1 := Some t2), 1
+           | { contents = Some t1 }, { contents = Some t2 } ->
+             Queue.add (Eq { lhs = t1; rhs = t2 }) ct.workq, 0
+           | _, _ -> Queue.add t ct.workq, 1)
+        | Types.Void (Ref r), c | c, Types.Void (Ref r) -> (r := Some c), 1
+        | _, _ -> Queue.add t ct.workq, 0
+      in
+      loop (retries - less)
     | _ -> ()
   in
   loop (Queue.length ct.workq);
