@@ -5,7 +5,9 @@ type index = int
 
 type cell =
   | Ctor of cell Types.t
-  | Ref of index
+  | Ref of cell Types.t option ref * index
+
+type fix = Fix of fix Types.t
 
 type c =
   | Eq of
@@ -14,19 +16,21 @@ type c =
       }
 
 type t =
-  { nvar : int ref
+  { stack : cell Types.t option ref Stack.t
   ; workq : c Queue.t
   }
 
 let create () =
+  let stack = Stack.create () in
   let workq = Queue.create () in
-  { nvar = ref 0; workq }
+  { stack; workq }
 ;;
 
-let cell { nvar; _ } =
-  let index = !nvar in
-  incr nvar;
-  Ref index
+let cell { stack; _ } =
+  let index = Stack.length stack in
+  let r = ref None in
+  Stack.push r stack;
+  Ref (r, index)
 ;;
 
 let rec destructure lc rc =
@@ -75,15 +79,80 @@ let constraints lang =
   loop lang, tbl, ct
 ;;
 
-let _true =
-  let ssa_0 = Fn { _from = 1; _to = Bind 1 } in
-  let ssa_1 = Call { _fn = Bind 0; _with = Bool true } in
-  Let { _let = 0; _be = ssa_0; _in = ssa_1 }
+exception TypeError
+
+let rec concrete = function
+  | Ctor ctor -> restruct ctor
+  | Ref (r, _) ->
+    (match !r with
+     | Some t -> restruct t
+     | None -> raise TypeError)
+
+and restruct = function
+  | Types.Bool -> Fix Types.Bool
+  | Types.Fn { _from; _to } ->
+    Fix (Types.Fn { _from = concrete _from; _to = concrete _to })
 ;;
 
-let _or =
-  let lhs, rhs = Bind 0, Bind 1 in
-  let ssa_0 = If { _if = lhs; _then = rhs; _else = lhs } in
-  let ssa_1 = Fn { _from = 1; _to = ssa_0 } in
-  Fn { _from = 0; _to = ssa_1 }
+let infer lang =
+  let _ret, tbl, ct = constraints lang in
+  let rec loop = function
+    | retries when retries > 0 ->
+      let t = Queue.take ct.workq in
+      let (Eq { lhs; rhs }) = t in
+      (match lhs, rhs with
+       | Ref (r, _), Ctor c | Ctor c, Ref (r, _) ->
+         r := Some c;
+         loop (retries - 1)
+       | Ref ({ contents = Some t1 }, _), Ref (({ contents = None } as r2), _)
+         ->
+         r2 := Some t1;
+         loop (retries - 1)
+       | Ref (({ contents = None } as r1), _), Ref ({ contents = Some t2 }, _)
+         ->
+         r1 := Some t2;
+         loop (retries - 1)
+       | Ref ({ contents = Some t1 }, _), Ref ({ contents = Some t2 }, _) ->
+         Queue.add (Eq { lhs = Ctor t1; rhs = Ctor t2 }) ct.workq;
+         loop retries
+       | _ ->
+         Queue.add t ct.workq;
+         loop (retries - 1))
+    | _ -> ()
+  in
+  loop (Queue.length ct.workq);
+  if Queue.is_empty ct.workq
+  then (
+    let h = Table.create (Table.length tbl) in
+    Table.iter (fun k v -> Table.add h k (concrete v)) tbl;
+    Ok h)
+  else Error (tbl, ct)
+;;
+
+let%test "true" =
+  let _true =
+    let ssa_0 = Fn { _from = 1; _to = Bind 1 } in
+    let ssa_1 = Call { _fn = Bind 0; _with = Bool true } in
+    Let { _let = 0; _be = ssa_0; _in = ssa_1 }
+  in
+  match infer _true with
+  | Error _e -> false
+  | Ok t ->
+    List.of_seq (Table.to_seq t)
+    = [ 0, Fix (Types.Fn { _from = Fix Types.Bool; _to = Fix Types.Bool })
+      ; 1, Fix Types.Bool
+      ]
+;;
+
+let%test "or" =
+  let _or =
+    let lhs, rhs = Bind 0, Bind 1 in
+    let ssa_0 = If { _if = lhs; _then = rhs; _else = lhs } in
+    let ssa_1 = Fn { _from = 1; _to = ssa_0 } in
+    Fn { _from = 0; _to = ssa_1 }
+  in
+  match infer _or with
+  | Error _e -> false
+  | Ok t ->
+    List.of_seq (Table.to_seq t) = [ 0, Fix Types.Bool; 1, Fix Types.Bool ]
 ;;
