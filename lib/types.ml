@@ -1,6 +1,6 @@
-type t =
+type 'a t =
   | Bool
   | Fn of
-      { _from : t
-      ; _to : t
+      { _from : 'a
+      ; _to : 'a
       }
