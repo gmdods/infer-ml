@@ -1,24 +1,24 @@
 type v = int
 
-type t =
-  | Bind of v
+type 'a t =
+  | Bind of 'a
   | Let of
-      { _let : v
-      ; _be : t
-      ; _in : t
+      { _let : 'a
+      ; _be : 'a t
+      ; _in : 'a t
       }
   | Fn of
-      { _from : v
-      ; _to : t
+      { _from : 'a
+      ; _to : 'a t
       }
   | Call of
-      { _fn : t
-      ; _with : t
+      { _fn : 'a t
+      ; _with : 'a t
       }
   | If of
-      { _if : t
-      ; _then : t
-      ; _else : t
+      { _if : 'a t
+      ; _then : 'a t
+      ; _else : 'a t
       }
   | Bool of bool
 
@@ -31,4 +31,3 @@ module Types = struct
         ; _to : 'a t
         }
 end
-

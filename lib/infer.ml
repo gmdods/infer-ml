@@ -3,9 +3,12 @@ module Table = Hashtbl.Make (Int)
 
 type index = int
 
-type cell = typevar option ref
-and reference = Ref of cell
-and typevar = reference Types.t
+type cell =
+  { mutable cell : typevar option
+  ; index : index
+  }
+
+and typevar = cell Types.t
 
 type c = Eq of typevar * typevar
 
@@ -21,9 +24,9 @@ let create () =
 ;;
 
 let cell { stack; _ } =
-  let r = ref None in
+  let r = { cell = None; index = Stack.length stack } in
   Stack.push r stack;
-  Types.Void (Ref r)
+  Types.Void r
 ;;
 
 let constraints lang =
@@ -67,11 +70,9 @@ let constraints lang =
 exception TypeError
 
 let to_type tbl =
-  let rec concrete : reference Types.t -> unit Types.t = function
-    | Types.Void (Ref r) ->
-      (match !r with
-       | Some t -> concrete t
-       | None -> raise TypeError)
+  let rec concrete : cell Types.t -> unit Types.t = function
+    | Types.Void { cell = None; _ } -> raise TypeError
+    | Types.Void { cell = Some t; _ } -> concrete t
     | Types.Bool -> Types.Bool
     | Types.Fn { _from; _to } ->
       Types.Fn { _from = concrete _from; _to = concrete _to }
@@ -81,30 +82,37 @@ let to_type tbl =
   types
 ;;
 
+let solver workq = function
+  | Eq (Types.Void r1, Types.Void r2) as t ->
+    (match r1, r2 with
+     | { cell = Some e; _ }, ({ cell = None; _ } as r)
+     | ({ cell = None; _ } as r), { cell = Some e; _ } ->
+       r.cell <- Some e;
+       1
+     | { cell = Some t1; _ }, { cell = Some t2; _ } ->
+       Queue.add (Eq (t1, t2)) workq;
+       0
+     | _, _ ->
+       Queue.add t workq;
+       1)
+  | Eq (Types.Void r, c) | Eq (c, Types.Void r) ->
+    r.cell <- Some c;
+    1
+  | t ->
+    Queue.add t workq;
+    0
+;;
+
 let infer lang =
-  let _ret, tbl, ct = constraints lang in
+  let _ret, tbl, { workq; _ } = constraints lang in
   let rec loop = function
     | retries when retries > 0 ->
-      let t = Queue.take ct.workq in
-      let (Eq (lhs, rhs)) = t in
-      let (), less =
-        match lhs, rhs with
-        | Types.Void (Ref r1), Types.Void (Ref r2) ->
-          (match r1, r2 with
-           | { contents = Some t }, ({ contents = None } as r)
-           | ({ contents = None } as r), { contents = Some t } ->
-             (r := Some t), 1
-           | { contents = Some t1 }, { contents = Some t2 } ->
-             Queue.add (Eq (t1, t2)) ct.workq, 0
-           | _, _ -> Queue.add t ct.workq, 1)
-        | Types.Void (Ref r), c | c, Types.Void (Ref r) -> (r := Some c), 1
-        | _, _ -> Queue.add t ct.workq, 0
-      in
+      let less = solver workq (Queue.take workq) in
       loop (retries - less)
     | _ -> ()
   in
-  loop (Queue.length ct.workq);
-  if Queue.is_empty ct.workq then Ok (to_type tbl) else Error (tbl, ct)
+  loop (Queue.length workq);
+  if Queue.is_empty workq then Ok (to_type tbl) else Error (tbl, workq)
 ;;
 
 let%test "true" =
@@ -130,4 +138,15 @@ let%test "or" =
   match infer _or with
   | Error _e -> false
   | Ok t -> List.of_seq (Table.to_seq t) = [ 0, Types.Bool; 1, Types.Bool ]
+;;
+
+let%test "why" =
+  let _why =
+    let ssa_0 = Call { _fn = Bind 0; _with = Bind 0 } in
+    let ssa_1 = Fn { _from = 0; _to = ssa_0 } in
+    Call { _fn = ssa_1; _with = Bool true }
+  in
+  match infer _why with
+  | Ok _t -> false
+  | Error (_, workq) -> not (Queue.is_empty workq)
 ;;
